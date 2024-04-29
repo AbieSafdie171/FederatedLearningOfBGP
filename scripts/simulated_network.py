@@ -21,13 +21,13 @@ class Node:
 class Router:
     def __init__(self, router_id):
         self.router_id = router_id
-        self.neighboring_routers = []
+        self.neighboring_routers = {}
         self.nodes = []
 
-    def add_neighbor(self, neighbor):
-        if neighbor not in self.neighboring_routers and self not in neighbor.neighboring_routers:
-            self.neighboring_routers.append(neighbor)
-            neighbor.neighboring_routers.append(self)
+    def update_neighbor(self, neighbor, cost):
+        self.neighboring_routers[neighbor] = cost
+        neighbor.neighboring_routers[self] = cost
+
 
 
 
@@ -36,7 +36,6 @@ class InternalRouter(Router):
     def __init__(self, router_id):
         super().__init__(router_id)
         self.routing_table = {}
-
         self.distance_vector = {}  # Distance vector to store distances to other routers
 
     def forward_message(self, dest_ip, msg):
@@ -46,24 +45,22 @@ class InternalRouter(Router):
                 return
         # else forward to next router
 
-    def bgp_announcement(self, dest_ip_range, next_hop_router, path):
+    def bgp_announcement(self, dest_ip_range, next_hop_router, cost):
         for router in self.neighboring_routers:
-            router.update_table(dest_ip_range, next_hop_router, path)
+            router.update_table(dest_ip_range, next_hop_router, cost)
 
     def update_table(self, dest_ip_range, next_hop_router, path):
         if dest_ip_range not in self.routing_table:
             self.routing_table[dest_ip_range] = next_hop_router, path
 
         # Update distance vector based on the received routing information
-        self.distance_vector[next_hop_router] = 1
+        # self.distance_vector[next_hop_router] = self.neighboring_routers[next_hop_router]
 
-        # Distance vector algorithm implementation
+        # print(self.neighboring_routers.keys())
+
+        # bellman ford
         for dest_ip_range, (router, path) in self.routing_table.items():
-            if router != self.router_id:
-                new_distance = len(path) + self.distance_vector[next_hop_router]
-                if dest_ip_range not in self.distance_vector or new_distance < \
-                        self.distance_vector[router]:
-                    self.distance_vector[router] = new_distance
+            pass
 
 
 class ExternalRouter(Router):
@@ -91,7 +88,7 @@ class AutonomousSystem:
 router1 = InternalRouter("Router1")
 router2 = InternalRouter("Router2")
 
-router1.add_neighbor(router2)
+router1.update_neighbor(router2, 5)
 
 # Add routers to the autonomous system
 autonomous_system = AutonomousSystem("AS1")
@@ -99,7 +96,7 @@ autonomous_system.internal_routers.append(router1)
 autonomous_system.internal_routers.append(router2)
 
 # destination, next-hop, path
-router1.bgp_announcement("10.0.0.0/24", "Router1", ["Router1"])
+router1.bgp_announcement("10.0.0.0/24", router1, ["Router1"])
 
-print("Router 2 routing table: ", router2.routing_table)
-print("Router 2 distance vector: ", router2.distance_vector)
+# print("Router 2 routing table: ", router2.routing_table)
+# print("Router 2 distance vector: ", router2.distance_vector)
