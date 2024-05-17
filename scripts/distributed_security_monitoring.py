@@ -163,7 +163,7 @@ class BGPCollector:
     def receive_update(self, start, end):
         update_url = f"https://stat.ripe.net/data/bgp-updates/data.json?resource={self.ip_prefix}" \
                      f"&rrcs={self.collector}&starttime={start}&endtime={end}"
-        print("Update received")
+        # print("Update received")
         with mutex:
             update_response = requests.get(update_url)
             bgp_updates = None
@@ -198,9 +198,10 @@ class BGPCollector:
 
 
                 self.train_models()
-                #if self is not leader:
-                    #self.send_local_models(self.raw_path_lengths, self.raw_paths, self.raw_source_ips, self.raw_community)
+                if self is not leader:
+                    self.send_local_models(self.raw_path_lengths, self.raw_paths, self.raw_source_ips, self.raw_community)
                 # self.update_trust(trust_vals)
+        print(threading.current_thread().ident, "released the lock")
 
     def update_trust(self, trust_vals):
         path_length = trust_vals[0]
@@ -300,7 +301,7 @@ if __name__ == "__main__":
     bgp_collector_16 = BGPCollector("208.65.153.238", "16", startime, endtime)
 
 
-    stime = "2024-05-11T17:59:51"
+    stime = "2024-05-01T17:59:51"
     etime = "2024-05-15T17:59:51"
 
     collectors = [bgp_collector_11, bgp_collector_14, bgp_collector_16]
