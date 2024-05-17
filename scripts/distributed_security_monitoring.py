@@ -1,8 +1,11 @@
-import requests
-import numpy as np
+import requests  # to connect to ripe database
+import math
 import matplotlib.pyplot as plt
-import pandas as pd
+import threading  # to run multiple collectors in parallel
 
+leader = None
+collectors = None
+mutex = threading.Lock()
 
 def ip_to_integer(ip_address):
     octets = ip_address.split('.')
@@ -18,6 +21,7 @@ def ip_to_integer(ip_address):
 class BGPCollector:
 
     def __init__(self, ip_prefix, collector, starttime, endtime):
+        self.trust = 1000
         self.ip_prefix = ip_prefix
         self.collector = collector
         self.starttime = starttime
@@ -28,6 +32,10 @@ class BGPCollector:
         self.raw_community = []
         self.raw_source_ips = []
         self.raw_withdrawal_ips = []
+        self.path_length_ratio = None
+        self.ip_ratio = None
+        self.path_ratio = None
+        self.comm_ratio = None
         self.path_length_model = {}
         self.ip_model = {}
         self.path_model = {}
@@ -44,7 +52,7 @@ class BGPCollector:
                 dictionary[value] = 1
         return None
 
-    def collect_data(self):
+    def collect_initial_data(self):
 
         update_url = f"https://stat.ripe.net/data/bgp-updates/data.json?resource={self.ip_prefix}" \
                      f"&rrcs={self.collector}&starttime={self.starttime}&endtime={self.endtime}"
@@ -78,6 +86,7 @@ class BGPCollector:
                                                   "")
                     source_id = ip_to_integer(source_id)
                     self.raw_withdrawal_ips.append(source_id)
+            self.train_models()
         else:
             print("error connecting to ripe database")
 
@@ -116,8 +125,8 @@ class BGPCollector:
             path_length_sum += value
             if key == path_length:
                 path_length_value = value
-        path_length_ratio = path_length_value / path_length_sum
-        print(path_length_ratio)
+        self.path_length_ratio = path_length_value / path_length_sum
+        path_length_trust = self.path_length_ratio
 
         """IPs"""
         ip_value = 0
@@ -126,8 +135,8 @@ class BGPCollector:
             ip_sum += value
             if key == ip:
                 ip_value = value
-        ip_ratio = ip_value / ip_sum
-        print(ip_ratio)
+        self.ip_ratio = ip_value / ip_sum
+        ip_trust = self.ip_ratio
 
         """Path"""
         path_value = 0
@@ -136,8 +145,8 @@ class BGPCollector:
             path_sum += value
             if key == tuple(path):
                 path_value = value
-        path_ratio = path_value / path_sum
-        print(path_ratio)
+        self.path_ratio = path_value / path_sum
+        path_trust = self.path_ratio
 
         """Community"""
         comm_value = 0
@@ -146,46 +155,137 @@ class BGPCollector:
             comm_sum += value
             if key == tuple(community):
                 comm_value = value
-        comm_ratio = comm_value / comm_sum
-        print(comm_ratio)
+        self.comm_ratio = comm_value / comm_sum
+        comm_trust = self.comm_ratio
+
+        return [path_length_trust, ip_trust, path_trust, comm_trust]
 
     def receive_update(self, start, end):
         update_url = f"https://stat.ripe.net/data/bgp-updates/data.json?resource={self.ip_prefix}" \
                      f"&rrcs={self.collector}&starttime={start}&endtime={end}"
+        print("Update received")
+        with mutex:
+            update_response = requests.get(update_url)
+            bgp_updates = None
+            global leader
+            print(threading.current_thread().ident, "got the lock")
+            if update_response.status_code == 200:
+                update_data = update_response.json()
+                self.nr_updates += update_data["data"]["nr_updates"]
+                bgp_updates = update_data["data"]["updates"]
+                self.raw_path_lengths = []
+                self.raw_source_ips = []
+                self.raw_paths = []
+                self.raw_community = []
+                for update in bgp_updates:
+                    type_of_update = update["type"]
+                    if type_of_update == "A":
+                        path_length = len(update["attrs"]["path"])
+                        path = update["attrs"]["path"]
+                        source_id = update["attrs"]["source_id"]
+                        source_id = source_id.replace(f"{self.collector}-",
+                                                      "")
+                        source_id = ip_to_integer(source_id)
+                        community = update["attrs"]["community"]
 
-        update_response = requests.get(update_url)
-        bgp_updates = None
+                        self.raw_path_lengths.append(path_length)
+                        self.raw_paths.append(path)
+                        self.raw_source_ips.append(source_id)
+                        self.raw_community.append(community)
 
-        if update_response.status_code == 200:
-            update_data = update_response.json()
-            self.nr_updates += update_data["data"]["nr_updates"]
-            bgp_updates = update_data["data"]["updates"]
-            for update in bgp_updates:
-                type_of_update = update["type"]
-                if type_of_update == "A":
-                    path_length = len(update["attrs"]["path"])
-                    path = update["attrs"]["path"]
-                    source_id = update["attrs"]["source_id"]
-                    source_id = source_id.replace(f"{self.collector}-",
-                                                  "")
-                    source_id = ip_to_integer(source_id)
-                    community = update["attrs"]["community"]
+                        trust_vals = self.calculate_ratios(path_length, source_id, path, community)
+                        print(trust_vals)
 
-                    self.raw_path_lengths.append(path_length)
-                    self.raw_paths.append(path)
-                    self.raw_community.append(community)
-                    self.raw_source_ips.append(source_id)
 
-        self.train_models()
+                self.train_models()
+                #if self is not leader:
+                    #self.send_local_models(self.raw_path_lengths, self.raw_paths, self.raw_source_ips, self.raw_community)
+                # self.update_trust(trust_vals)
 
-    def define_trust(self):
-        pass
+    def update_trust(self, trust_vals):
+        path_length = trust_vals[0]
+        source_id = trust_vals[1]
+        path = trust_vals[2]
+        community = trust_vals[3]
 
-    def update_trust(self):
-        pass
+        # delta_trust = path_length
+        k = 1
+        d = 1
+        delta_path_length = (1 - math.exp(
+            -k * abs(2 * path_length - 1))) * math.copysign(1,
+                                                            2 * path_length - 1) * d
 
-    def receive_trust_update(self):
-        pass
+        # print(path_length, "|", delta_path_length)
+
+        k = 1
+        d = 1
+        delta_source_id = (1 - math.exp(
+            -k * abs(2 * source_id - 1))) * math.copysign(1,
+                                                          2 * source_id - 1) * d
+        # print(source_id, "|", delta_source_id)
+
+        k = 2
+        d = 5
+        delta_path = (1 - math.exp(-k * abs(2 * path - 1))) * math.copysign(1,
+                                                                            2 * path - 1) * d
+        # print(path, "|", delta_path)
+
+        k = 2
+        d = 2
+        delta_community = (1 - math.exp(
+            -k * abs(2 * community - 1))) * math.copysign(1,
+                                                          2 * community - 1) * d
+        # print(community, "|", delta_community)
+
+        self.trust += delta_path + delta_community + delta_source_id + delta_path_length
+
+        # use threads and mutal exclusion and share data updates and oh my oh lord oh no
+
+        # send trust update
+
+    def send_local_models(self, path_length, source_id, path, community):
+        """
+            Sending my Model
+        """
+        # print("hello")
+        global leader
+        leader.update_models(path_length, source_id,
+                             path, community)
+
+    def update_models(self, path_length_model, ip_model, path_model,
+                      community_model):
+        """
+            Update Models
+        """
+        # print(path_length_model)
+        for value in path_length_model:
+            if value in self.path_length_model:
+                self.path_length_model[value] += 1
+            else:
+                self.path_length_model[value] = 1
+
+
+        global leader
+        global collectors
+        if self is leader:
+            for collector in collectors:
+                if collector is not self:
+                    collector.receive_central_model(self.path_length_model,
+                                                    self.ip_model,
+                                                    self.path_model,
+                                                    self.community_model)
+
+    def receive_central_model(self, path_length_model, ip_model, path_model,
+                              community_model):
+        self.path_length_model = path_length_model
+        self.ip_model = ip_model
+        self.path_model = path_model
+        self.community_model = community_model
+
+
+def update(bgp_collector: BGPCollector, start, end):
+    bgp_collector.receive_update(start, end)
+    print(f"{bgp_collector.collector}: {bgp_collector.trust}")
 
 
 if __name__ == "__main__":
@@ -196,37 +296,28 @@ if __name__ == "__main__":
     startime = "2024-02-01T17:59:51"
     endtime = "2024-04-01T17:59:51"
     bgp_collector_11 = BGPCollector("208.65.153.238", "11", startime, endtime)
-    bgp_collector_11.collect_data()
-    bgp_collector_11.train_models()
+    bgp_collector_14 = BGPCollector("208.65.153.238", "14", startime, endtime)
+    bgp_collector_16 = BGPCollector("208.65.153.238", "16", startime, endtime)
 
-    bgp_collector_11.calculate_ratios(3, 3324026919, [9002, 15169, 43515],
-                                      ['13030:1', '13030:3', '13030:50000',
-                                       '13030:51129'])
 
-    bgp_collector_11.receive_update("2024-04-02T17:59:51",
-                                    "2024-05-01T17:59:51")
+    stime = "2024-05-11T17:59:51"
+    etime = "2024-05-15T17:59:51"
 
-    print("---------------------------------")
+    collectors = [bgp_collector_11, bgp_collector_14, bgp_collector_16]
+    collector_threads = []
 
-    bgp_collector_11.calculate_ratios(3, 3324026919, [9002, 15169, 43515],
-                                      ['13030:1', '13030:3', '13030:50000',
-                                       '13030:51129'])
+    for collector in collectors:
+        collector.collect_initial_data()
 
-    """
-    startime2 = "2024-04-02T17:59:51"
-    endtime2 = "2024-05-012T17:59:51"
-    bgp_collector_11_2 = BGPCollector("208.65.153.238", "11", startime2, endtime2)
-    bgp_collector_11_2.collect_data()
-    bgp_collector_11_2.train_models()
-    """
+    leader = collectors[0]
 
-    # Implement a trust model
-    """
-    bgp_collector_12 = BGPCollector("208.65.153.238", "16")
-    bgp_collector_12.collect_data()
-    bgp_collector_12.train_models()
+    for collector in collectors:
+        worker = threading.Thread(target=update, args=(collector, stime, etime))
+        collector_threads.append(worker)
+        worker.start()
 
-    bgp_collector_14 = BGPCollector("208.65.153.238", "14")
-    bgp_collector_14.collect_data()
-    bgp_collector_14.train_models()
-    """
+    for worker in collector_threads:
+        worker.join()
+
+    for collector in collectors:
+        print(collector.path_length_model)
