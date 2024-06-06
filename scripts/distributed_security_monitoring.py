@@ -1,3 +1,10 @@
+"""
+
+This file serves as my main blank for detecting
+
+
+"""
+
 import requests  # to connect to ripe database
 import math  # math!
 import matplotlib.pyplot as plt  # plotting library
@@ -7,6 +14,7 @@ leader = None  # bgp collector who acts as leader
 collectors = None  # list of collectors
 trust_over_time = {}  # trust values for plotting
 mutex = threading.Lock()  # lock for mutual exclusion across threads
+ratio_mutex = threading.Lock()
 base_trust = 100
 
 
@@ -36,12 +44,12 @@ class BGPPeer:
             d = 0.75 if trust_vals[i] <= 0.01 and i == 1 else 0.4
             tmp = (1 - math.exp(
                 -k * abs(1.75 * trust_vals[i] - 1))) * math.copysign(1, 1.75 *
-                                                                    trust_vals[
-                                                                        i] - 1) * d
+                                                                     trust_vals[
+                                                                         i] - 1) * d
             val += tmp
 
         self.trust += val  # update trust
-        return None
+        return val
 
 
 class BGPCollector:
@@ -93,14 +101,14 @@ class BGPCollector:
         for peer in self.bgp_peers:
             if peer.ip == peer_ip:
                 if trust_values is not None:
-                    self.flag_path(peer)
-                    peer.update_trust(trust_values)
+                    val = peer.update_trust(trust_values)
+                    self.flag_path(peer, val)
                 return None
         self.bgp_peers.append(BGPPeer(peer_ip))
         return None
 
-    def flag_path(self, peer):
-        if peer.trust < (base_trust * 0.6):
+    def flag_path(self, peer, val):
+        if peer.trust < (base_trust * 0.6) and val < 0:
             print(f"POTENTIAL BGP HIJACKING DETECTED FROM {peer.ip}. ALERT "
                   f"SYSTEM ADMIN")
 
@@ -260,11 +268,10 @@ class BGPCollector:
                         self.raw_community.append(community)
 
                         # calculate the frequencies
-                        trust_vals = self.calculate_ratios(path_length, path,
-                                                           community)
-
-                        self.update_peers(peer_ip, trust_vals)
-
+                        with mutex:
+                            trust_vals = self.calculate_ratios(path_length, path,
+                                                               community)
+                            self.update_peers(peer_ip, trust_vals)
 
                 with mutex:
                     self.train_models()  # train our local models
@@ -419,17 +426,17 @@ def update(bgp_collector: BGPCollector, start, end):
     return None
 
 
-if __name__ == "__main__":
+def example_main():
 
-    # 208.65.153.238 = youtube
-    # 140.211.0.0/16 = uoregon
+    name = input("Enter name of site you intend to use: ")
+    ip = input("Enter the IP of site: ")
 
     startime = "2023-6-01T17:59:51"
     endtime = "2023-09-01T17:59:51"
-    bgp_collector_11 = BGPCollector("140.211.0.0/16", "11", startime, endtime)
-    bgp_collector_14 = BGPCollector("140.211.0.0/16", "14", startime, endtime)
-    bgp_collector_16 = BGPCollector("140.211.0.0/16", "16", startime, endtime)
-    bgp_collector_21 = BGPCollector("140.211.0.0/16", "21", startime, endtime)
+    bgp_collector_11 = BGPCollector(ip, "11", startime, endtime)
+    bgp_collector_14 = BGPCollector(ip, "14", startime, endtime)
+    bgp_collector_16 = BGPCollector(ip, "16", startime, endtime)
+    bgp_collector_21 = BGPCollector(ip, "21", startime, endtime)
 
     start_update_times = ["2023-09-01T17:59:52", "2023-10-01T17:59:52",
                           "2023-11-01T17:59:52", "2023-12-01T17:59:52",
@@ -442,10 +449,12 @@ if __name__ == "__main__":
                         "2024-04-01T17:59:51", "2024-05-01T17:59:51",
                         "2024-05-19T17:59:51"]
 
+    global collectors
     collectors = [bgp_collector_11, bgp_collector_14, bgp_collector_16,
                   bgp_collector_21]
     collector_threads = []
 
+    global leader
     leader = collectors[0]
 
     for collector in collectors:
@@ -465,6 +474,10 @@ if __name__ == "__main__":
     for worker in collector_threads:
         worker.join()
 
-    plot_line_graph("uoregon-line-graph.png")
+    plot_line_graph(f"{name}-line-graph.png")
 
-    plot_bar_graph("uoregon-bar-graph.png")
+    plot_bar_graph(f"{name}-bar-graph.png")
+
+
+if __name__ == "__main__":
+    example_main()
