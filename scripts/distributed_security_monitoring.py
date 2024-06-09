@@ -1,7 +1,10 @@
 """
+Author: Abie Safdie
+Date: 6/3/2024
 
-This file serves as my main blank for detecting
+This file serves as my main driver for my distributed security monitoring system.
 
+See the attached README.md and manual for more information on how to use this system.
 
 """
 
@@ -9,6 +12,7 @@ import requests  # to connect to ripe database
 import math  # math!
 import matplotlib.pyplot as plt  # plotting library
 import threading  # to run multiple collectors in parallel
+import sys
 
 leader = None  # bgp collector who acts as leader
 collectors = None  # list of collectors
@@ -16,6 +20,9 @@ trust_over_time = {}  # trust values for plotting
 mutex = threading.Lock()  # lock for mutual exclusion across threads
 ratio_mutex = threading.Lock()
 base_trust = 100
+
+peer_lock = threading.Lock()
+bgp_peers = []
 
 
 class BGPPeer:
@@ -37,7 +44,7 @@ class BGPPeer:
         :return: None
         """
         self.num_updates += 1
-        val = 0  # value to add to trust
+        delta_trust = 0  # value to add to trust
         k = 0.2
         for i in range(len(trust_vals)):
             # if path attribute and if new announcement (<0.01) apply greater weight
@@ -46,10 +53,10 @@ class BGPPeer:
                 -k * abs(1.75 * trust_vals[i] - 1))) * math.copysign(1, 1.75 *
                                                                      trust_vals[
                                                                          i] - 1) * d
-            val += tmp
+            delta_trust += tmp
 
-        self.trust += val  # update trust
-        return val
+        self.trust += delta_trust  # update trust
+        return delta_trust
 
 
 class BGPCollector:
@@ -78,7 +85,6 @@ class BGPCollector:
         self.path_length_model = {}  # dict containing path length mapped to how many times it occured
         self.path_model = {}  # dict containing paths mapped to how many times it occured
         self.community_model = {}  # dict containing bgp communities mapped to how many times it occured
-        self.bgp_peers = []
 
     def count_occurrences(self, dictionary, values, keys_are_list=False):
         """
@@ -98,13 +104,17 @@ class BGPCollector:
         return None
 
     def update_peers(self, peer_ip, trust_values=None):
-        for peer in self.bgp_peers:
+        peer_lock.acquire()
+        global bgp_peers
+        for peer in bgp_peers:
             if peer.ip == peer_ip:
                 if trust_values is not None:
                     val = peer.update_trust(trust_values)
                     self.flag_path(peer, val)
+                peer_lock.release()
                 return None
-        self.bgp_peers.append(BGPPeer(peer_ip))
+        bgp_peers.append(BGPPeer(peer_ip))
+        peer_lock.release()
         return None
 
     def flag_path(self, peer, val):
@@ -149,6 +159,7 @@ class BGPCollector:
             self.train_models()  # 'train' the models
         else:
             print("error connecting to ripe database")
+            sys.exit(1)
 
         return None
 
@@ -269,7 +280,8 @@ class BGPCollector:
 
                         # calculate the frequencies
                         with mutex:
-                            trust_vals = self.calculate_ratios(path_length, path,
+                            trust_vals = self.calculate_ratios(path_length,
+                                                               path,
                                                                community)
                             self.update_peers(peer_ip, trust_vals)
 
@@ -289,9 +301,31 @@ class BGPCollector:
             :return None
         """
         global leader
+        if leader is None:
+            self.elect_leader()
         if self is not leader:
             leader.update_models(path_length, path, community)
         return None
+
+    def elect_leader(self):
+        """
+            Elect a new leader to handle coordination and hold central model
+        :return:
+        """
+        global leader
+        global collectors
+        highest_id = -1
+        new_leader = None
+        print("hi")
+
+        for collector in collectors:
+            if collector.collector > highest_id:
+                new_leader = collector
+                highest_id = collector.collector
+
+        leader = new_leader
+        return None
+
 
     def update_models(self, path_length, path_model,
                       community_model):
@@ -351,13 +385,20 @@ def save_trust_for_graph():
     """
     global collectors
     global trust_over_time
+    global bgp_peers
 
-    for collector in collectors:
+    for peer in bgp_peers:
+        if peer.ip in trust_over_time:
+            trust_over_time[peer.ip].append(peer.trust)
+        else:
+            trust_over_time[peer.ip] = [peer.trust]
+
+    """    for collector in collectors:
         for bgp_peer in collector.bgp_peers:
             if bgp_peer.ip in trust_over_time:
                 trust_over_time[bgp_peer.ip].append(bgp_peer.trust)
             else:
-                trust_over_time[bgp_peer.ip] = [bgp_peer.trust]
+                trust_over_time[bgp_peer.ip] = [bgp_peer.trust]"""
     return None
 
 
@@ -385,7 +426,7 @@ def plot_line_graph(name):
                 value.append(value[-1])
         plt.plot(x_values, value, label=f"BGP Peer: {key}")
 
-    plt.xlabel('Update')
+    plt.xlabel('Time')
     plt.ylabel('Trust Value')
     plt.title('Trust Value Over Time for Each BGP Peer')
     # plt.legend()
@@ -407,7 +448,7 @@ def plot_bar_graph(name):
 
     plt.xlabel('BGP Peer')
     plt.ylabel('Trust Value')
-    plt.title('Final Trust Value of BGP Peer')
+    plt.title('\"Final\" Trust Value of BGP Peer')
     plt.xticks([])
     plt.savefig(f'{name}')
 
@@ -427,9 +468,10 @@ def update(bgp_collector: BGPCollector, start, end):
 
 
 def example_main():
-
     name = input("Enter name of site you intend to use: ")
     ip = input("Enter the IP of site: ")
+    print(
+        "running simulation... may take a minute, going through 7 months of BGP data")
 
     startime = "2023-6-01T17:59:51"
     endtime = "2023-09-01T17:59:51"
@@ -477,6 +519,22 @@ def example_main():
     plot_line_graph(f"{name}-line-graph.png")
 
     plot_bar_graph(f"{name}-bar-graph.png")
+
+    output_file_path = f'{name}.txt'
+
+    with open(output_file_path, 'w') as file:
+        global bgp_peers
+        for peer in bgp_peers:
+            file.write(
+                f"{peer.ip}: has trust {peer.trust}"'\n')
+
+        """        for collector in collectors:
+            for item in collector.bgp_peers:
+                file.write(
+                    f"{item.ip}: has trust {item.trust}"'\n')
+                    """
+
+    print("Simulation complete. Files with data saved locally.")
 
 
 if __name__ == "__main__":
